@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: tunnel-agent
+  main:
+    web-application-type: none
+  shell:
+    interactive:
+      enabled: true
+
+agent:
+  server-url: http://localhost:8080
+  heartbeat-interval: 30
+  connection-timeout: 5000
+  read-timeout: 10000
+logging:
+  level:
+    root: off
