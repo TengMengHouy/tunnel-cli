@@ -5,8 +5,10 @@ import com.istad.stadoor.tunnelagent.model.WsMessage;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -24,60 +26,80 @@ public class RequestForwarderService {
         this.wsClient = wsClient;
     }
 
-    // ── Init ────────────────────────────────────────────────────
+    // ── Init ──────────────────────────────────────────────────────
     @PostConstruct
     public void init() {
         wsClient.onPush("http_request", this::handleRequest);
         log.info("✓ RequestForwarderService ready");
     }
 
-    // ── Handle Incoming Request from Server ─────────────────────
+    // ── Handle Request from Server ────────────────────────────────
     private void handleRequest(WsMessage message) {
         Map<String, Object> payload = message.getPayload();
 
-        // Extract info
-        String requestId = message.getRequestId();  // ✅ Keep requestId
+        String requestId = message.getRequestId();
         String method    = str(payload, "method");
         String path      = str(payload, "path");
         int    localPort = Integer.parseInt(str(payload, "localPort"));
         String body      = str(payload, "body");
 
-        log.info("📨 Incoming: {} {} -> localhost:{}", method, path, localPort);
+        log.info("📨 {} {} -> localhost:{}", method, path, localPort);
 
         try {
-            // ✅ Call local Spring Boot
-            WebClient localClient = WebClient.builder()
+            // ✅ Build WebClient for local app
+            WebClient local = WebClient.builder()
                     .baseUrl("http://localhost:" + localPort)
+                    .defaultHeader("Accept", "*/*")
+                    .defaultHeader("Accept-Encoding", "identity")
+                    .codecs(configurer -> configurer
+                            .defaultCodecs()
+                            .maxInMemorySize(10 * 1024 * 1024) // 10MB
+                    )
                     .build();
 
-            String response = localClient
+            // ✅ Call local app
+            String response = local
                     .method(org.springframework.http.HttpMethod.valueOf(method))
                     .uri(path)
+                    .headers(headers -> {
+                        if (!body.isEmpty()) {
+                            headers.setContentType(MediaType.APPLICATION_JSON);
+                        }
+                    })
                     .bodyValue(body.isEmpty() ? "" : body)
                     .retrieve()
                     .bodyToMono(String.class)
-                    .onErrorReturn("Local server error")
+                    .onErrorResume(WebClientResponseException.class, e -> {
+                        log.error("❌ HTTP Error: {} {}",
+                                e.getStatusCode(), e.getMessage());
+                        return reactor.core.publisher.Mono.just(
+                                e.getResponseBodyAsString()
+                        );
+                    })
+                    .onErrorResume(e -> {
+                        log.error("❌ Error: {}", e.getMessage());
+                        return reactor.core.publisher.Mono.just(
+                                "{\"error\":\"" + e.getMessage() + "\"}"
+                        );
+                    })
                     .block();
 
-            log.info("✅ Got response from localhost:{}", localPort);
+            log.info("✅ Response from localhost:{}", localPort);
 
-            // ✅ Send back with requestId so server can match!
+            // ✅ Send back to server with requestId
             Map<String, Object> resp = new HashMap<>();
             resp.put("status", 200);
             resp.put("body",   response);
 
             wsClient.sendAsyncWithId("http_response", requestId, resp);
-
-            log.info("✅ Response sent back: requestId={}", requestId);
+            log.info("✅ Sent back: requestId={}", requestId);
 
         } catch (Exception e) {
             log.error("❌ Forward failed: {}", e.getMessage());
-
-            // ✅ Send error back with requestId
             try {
                 wsClient.sendAsyncWithId("http_response", requestId, Map.of(
                         "status", 500,
-                        "body",   "Error: " + e.getMessage()
+                        "body",   "{\"error\":\"" + e.getMessage() + "\"}"
                 ));
             } catch (Exception ignored) {
                 log.error("❌ Failed to send error response");
@@ -85,7 +107,7 @@ public class RequestForwarderService {
         }
     }
 
-    // ── Helper ──────────────────────────────────────────────────
+    // ── Helper ────────────────────────────────────────────────────
     private String str(Map<String, Object> map, String key) {
         Object val = map != null ? map.get(key) : null;
         return val != null ? val.toString() : "";
