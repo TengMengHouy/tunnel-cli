@@ -3,113 +3,196 @@ package com.istad.stadoor.tunnelagent.service;
 import com.istad.stadoor.tunnelagent.client.AgentWebSocketClient;
 import com.istad.stadoor.tunnelagent.model.WsMessage;
 import jakarta.annotation.PostConstruct;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.http.MediaType;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
 
+@Slf4j
 @Component
+@RequiredArgsConstructor
 public class RequestForwarderService {
-
-    private static final Logger log = LoggerFactory.getLogger(
-            RequestForwarderService.class
-    );
 
     private final AgentWebSocketClient wsClient;
 
-    public RequestForwarderService(AgentWebSocketClient wsClient) {
-        this.wsClient = wsClient;
-    }
-
-    // ── Init ──────────────────────────────────────────────────────
     @PostConstruct
     public void init() {
         wsClient.onPush("http_request", this::handleRequest);
         log.info("✓ RequestForwarderService ready");
     }
 
-    // ── Handle Request from Server ────────────────────────────────
     private void handleRequest(WsMessage message) {
         Map<String, Object> payload = message.getPayload();
-
         String requestId = message.getRequestId();
+
         String method    = str(payload, "method");
         String path      = str(payload, "path");
-        int    localPort = Integer.parseInt(str(payload, "localPort"));
+        int    localPort = parsePort(payload);   // ✅ Fixed
         String body      = str(payload, "body");
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> inHeaders = payload.get("headers") instanceof Map
+                ? (Map<String, String>) payload.get("headers")
+                : Map.of();
 
         log.info("📨 {} {} -> localhost:{}", method, path, localPort);
 
         try {
-            // ✅ Build WebClient for local app
             WebClient local = WebClient.builder()
                     .baseUrl("http://localhost:" + localPort)
-                    .defaultHeader("Accept", "*/*")
-                    .defaultHeader("Accept-Encoding", "identity")
-                    .codecs(configurer -> configurer
-                            .defaultCodecs()
-                            .maxInMemorySize(10 * 1024 * 1024) // 10MB
-                    )
+                    .codecs(c -> c.defaultCodecs()
+                            .maxInMemorySize(50 * 1024 * 1024)) // 50MB
                     .build();
 
-            // ✅ Call local app
-            String response = local
-                    .method(org.springframework.http.HttpMethod.valueOf(method))
+            Set<String> skipHeaders = Set.of(
+                    "host", "content-length",
+                    "transfer-encoding", "connection", "upgrade"
+            );
+
+            // Build request spec
+            var requestSpec = local
+                    .method(HttpMethod.valueOf(method))
                     .uri(path)
-                    .headers(headers -> {
-                        if (!body.isEmpty()) {
-                            headers.setContentType(MediaType.APPLICATION_JSON);
+                    .headers(h -> inHeaders.forEach((k, v) -> {
+                        if (!skipHeaders.contains(k.toLowerCase())) {
+                            h.set(k, v);
                         }
-                    })
-                    .bodyValue(body.isEmpty() ? "" : body)
+                    }));
+
+            // Add body if present
+            if (!body.isEmpty()) {
+                requestSpec.bodyValue(body);
+            }
+
+            // Execute request
+            ResponseEntity<byte[]> response = requestSpec
                     .retrieve()
-                    .bodyToMono(String.class)
+                    .toEntity(byte[].class)
                     .onErrorResume(WebClientResponseException.class, e -> {
-                        log.error("❌ HTTP Error: {} {}",
-                                e.getStatusCode(), e.getMessage());
+                        log.warn("⚠️ HTTP error: {} {}", e.getStatusCode(), path);
+
+                        // ✅ Fixed: use getHeaders() instead of getResponseHeaders()
                         return reactor.core.publisher.Mono.just(
-                                e.getResponseBodyAsString()
+                                ResponseEntity.status(e.getStatusCode())
+                                        .headers(e.getHeaders())   // ✅ Fixed
+                                        .body(e.getResponseBodyAsByteArray())
                         );
                     })
                     .onErrorResume(e -> {
-                        log.error("❌ Error: {}", e.getMessage());
+                        log.error("❌ Forward error: {}", e.getMessage());
+                        byte[] errBody = ("{\"error\":\"" + e.getMessage() + "\"}").getBytes(StandardCharsets.UTF_8);
                         return reactor.core.publisher.Mono.just(
-                                "{\"error\":\"" + e.getMessage() + "\"}"
+                                ResponseEntity.status(502).body(errBody)
                         );
                     })
                     .block();
 
-            log.info("✅ Response from localhost:{}", localPort);
+            if (response == null) {
+                sendError(requestId, 502, "Null response from local app");
+                return;
+            }
 
-            // ✅ Send back to server with requestId
-            Map<String, Object> resp = new HashMap<>();
-            resp.put("status", 200);
-            resp.put("body",   response);
+            int    statusCode    = response.getStatusCode().value();
+            byte[] responseBody  = response.getBody();
+
+            // Collect response headers
+            Map<String, String> responseHeaders = new LinkedHashMap<>();
+            response.getHeaders().forEach((k, values) -> {
+                // ✅ Fixed: use getFirst() instead of get(0)
+                String first = response.getHeaders().getFirst(k);
+                if (first != null) {
+                    responseHeaders.put(k, first);
+                }
+            });
+
+            // Detect content type
+            String contentType = responseHeaders.getOrDefault(
+                    "content-type",
+                    responseHeaders.getOrDefault("Content-Type", "")
+            );
+            boolean isBinary = isBinaryContent(contentType);
+
+            log.info("✅ Response: status={} | size={}bytes | binary={}",
+                    statusCode,
+                    responseBody != null ? responseBody.length : 0,
+                    isBinary);
+
+            // Build response payload
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("requestId", requestId);
+            resp.put("status",    statusCode);
+            resp.put("headers",   responseHeaders);
+            resp.put("isBinary",  isBinary);
+
+            if (isBinary && responseBody != null) {
+                resp.put("bodyBase64", Base64.getEncoder().encodeToString(responseBody));
+                resp.put("body",       null);
+            } else {
+                resp.put("body", responseBody != null
+                        ? new String(responseBody, StandardCharsets.UTF_8)
+                        : "");
+                resp.put("bodyBase64", null);
+            }
 
             wsClient.sendAsyncWithId("http_response", requestId, resp);
-            log.info("✅ Sent back: requestId={}", requestId);
+            log.info("✅ Sent response | requestId={}", requestId);
 
         } catch (Exception e) {
-            log.error("❌ Forward failed: {}", e.getMessage());
-            try {
-                wsClient.sendAsyncWithId("http_response", requestId, Map.of(
-                        "status", 500,
-                        "body",   "{\"error\":\"" + e.getMessage() + "\"}"
-                ));
-            } catch (Exception ignored) {
-                log.error("❌ Failed to send error response");
-            }
+            log.error("❌ Unexpected error: {}", e.getMessage(), e);
+            sendError(requestId, 500, e.getMessage());
         }
     }
 
-    // ── Helper ────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────
+
+    private boolean isBinaryContent(String contentType) {
+        if (contentType == null || contentType.isEmpty()) return false;
+        String ct = contentType.toLowerCase();
+        return ct.startsWith("image/")
+                || ct.startsWith("audio/")
+                || ct.startsWith("video/")
+                || ct.contains("octet-stream")
+                || ct.contains("pdf")
+                || ct.contains("zip")
+                || ct.contains("font");
+    }
+
+    private void sendError(String requestId, int status, String message) {
+        try {
+            wsClient.sendAsyncWithId("http_response", requestId, Map.of(
+                    "requestId",  requestId,
+                    "status",     status,
+                    "headers",    Map.of("content-type", "application/json"),
+                    "body",       "{\"error\":\"" + message + "\"}",
+                    "bodyBase64", "",
+                    "isBinary",   false
+            ));
+        } catch (Exception ex) {
+            log.error("❌ Failed to send error response: {}", ex.getMessage());
+        }
+    }
+
     private String str(Map<String, Object> map, String key) {
         Object val = map != null ? map.get(key) : null;
         return val != null ? val.toString() : "";
+    }
+
+    // ✅ Fixed: dedicated method for parsing localPort
+    private int parsePort(Map<String, Object> payload) {
+        try {
+            Object val = payload != null ? payload.get("localPort") : null;
+            return val != null ? Integer.parseInt(val.toString()) : 3000;
+        } catch (NumberFormatException e) {
+            log.warn("⚠️ Invalid localPort, defaulting to 3000");
+            return 3000;
+        }
     }
 }

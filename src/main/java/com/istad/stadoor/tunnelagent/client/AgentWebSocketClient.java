@@ -27,7 +27,7 @@ public class AgentWebSocketClient {
     private final ObjectMapper    mapper;
 
     private WebSocketSession session;
-    private volatile boolean connected           = false;
+    private volatile boolean connected             = false;
     private volatile boolean intentionalDisconnect = false;
 
     private final Map<String, CompletableFuture<WsMessage>> pendingRequests
@@ -43,7 +43,7 @@ public class AgentWebSocketClient {
         this.mapper.registerModule(new JavaTimeModule());
     }
 
-    // ── Connect ─────────────────────────────────────────────────
+    // ── Connect ───────────────────────────────────────────────────
     public Mono<Void> connect() {
         return Mono.fromCallable(() -> {
             intentionalDisconnect = false;
@@ -52,7 +52,7 @@ public class AgentWebSocketClient {
             String wsUrl   = baseUrl
                     .replace("http://",  "ws://")
                     .replace("https://", "wss://")
-                    + "/ws/agent";
+                    + "/agent-ws"; // ✅ Changed from /ws/agent to /agent-ws
 
             System.out.println("Connecting WebSocket to: " + wsUrl);
 
@@ -76,11 +76,11 @@ public class AgentWebSocketClient {
         });
     }
 
-    // ── Send and Wait ───────────────────────────────────────────
+    // ── Send and Wait ─────────────────────────────────────────────
     public Mono<WsMessage> sendAndWait(
-            String type,
+            String              type,
             Map<String, Object> payload,
-            long timeoutSec
+            long                timeoutSec
     ) {
         return Mono.create(sink -> {
             String reqId  = UUID.randomUUID().toString();
@@ -107,9 +107,9 @@ public class AgentWebSocketClient {
         });
     }
 
-    // ── Send Async (no requestId) ───────────────────────────────
+    // ── Send Async ────────────────────────────────────────────────
     public void sendAsync(
-            String type,
+            String              type,
             Map<String, Object> payload
     ) throws Exception {
         session.sendMessage(new TextMessage(
@@ -119,8 +119,7 @@ public class AgentWebSocketClient {
         ));
     }
 
-    // ── Send Async With RequestId ───────────────────────────────
-    // 👇 NEW METHOD
+    // ── Send Async With RequestId ─────────────────────────────────
     public void sendAsyncWithId(
             String              type,
             String              requestId,
@@ -133,17 +132,17 @@ public class AgentWebSocketClient {
         log.debug("✓ sendAsyncWithId: type={} | requestId={}", type, requestId);
     }
 
-    // ── Push Listener ───────────────────────────────────────────
+    // ── Push Listener ─────────────────────────────────────────────
     public void onPush(String type, Consumer<WsMessage> listener) {
         pushListeners.put(type, listener);
     }
 
-    // ── Disconnect Callback ─────────────────────────────────────
+    // ── Disconnect Callback ───────────────────────────────────────
     public void onDisconnect(Runnable callback) {
         this.onDisconnectCallback = callback;
     }
 
-    // ── Disconnect ──────────────────────────────────────────────
+    // ── Disconnect ────────────────────────────────────────────────
     public Mono<Void> disconnect() {
         return Mono.fromRunnable(() -> {
             intentionalDisconnect = true;
@@ -154,24 +153,24 @@ public class AgentWebSocketClient {
         });
     }
 
-    // ── Is Connected ────────────────────────────────────────────
+    // ── Is Connected ──────────────────────────────────────────────
     public boolean isConnected() {
         return connected && session != null && session.isOpen();
     }
 
-    // ── WebSocket Handler ───────────────────────────────────────
+    // ── WebSocket Handler ─────────────────────────────────────────
     private class Handler extends TextWebSocketHandler {
 
         @Override
         protected void handleTextMessage(
                 WebSocketSession s,
-                TextMessage message
+                TextMessage      message
         ) throws Exception {
             WsMessage msg = mapper.readValue(
                     message.getPayload(), WsMessage.class
             );
 
-            // ── Check pending requests first ────────────────────
+            // Check pending requests first
             if (msg.getRequestId() != null) {
                 var future = pendingRequests.get(msg.getRequestId());
                 if (future != null) {
@@ -180,7 +179,7 @@ public class AgentWebSocketClient {
                 }
             }
 
-            // ── Then check push listeners ───────────────────────
+            // Check push listeners
             var listener = pushListeners.get(msg.getType());
             if (listener != null) {
                 listener.accept(msg);
@@ -192,7 +191,7 @@ public class AgentWebSocketClient {
         @Override
         public void afterConnectionClosed(
                 WebSocketSession s,
-                CloseStatus status
+                CloseStatus      status
         ) {
             connected = false;
             log.info("WS closed: {}", status);
