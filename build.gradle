@@ -1,37 +1,65 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '4.0.5'
-    id 'io.spring.dependency-management' version '1.1.7'
-    id 'org.graalvm.buildtools.native' version '0.11.5'
+    id 'application'
+    id 'org.graalvm.buildtools.native' version '0.11.1'
 }
 
-group = 'co.istad.stadoor'
-version = '0.0.1-SNAPSHOT'
-description = 'stadoor-cli'
-
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
-    }
-}
+group = 'kh.edu.istad'
+version = '0.1.0'
 
 repositories {
     mavenCentral()
 }
 
-
-
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+graalvmNative {
+    metadataRepository {
+        enabled = true
+    }
+}
 dependencies {
-    implementation 'org.springframework.shell:spring-shell-starter:3.4.2'
-    implementation 'org.springframework.boot:spring-boot-starter-webflux'
-    implementation 'org.springframework.boot:spring-boot-starter-websocket'
-    implementation 'org.springframework.boot:spring-boot-starter'
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.2'
-    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.15.2'
-    compileOnly 'org.projectlombok:lombok'
-    annotationProcessor 'org.projectlombok:lombok'
 
-    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // Picocli CLI framework
+    implementation 'info.picocli:picocli:4.7.7'
+    annotationProcessor 'info.picocli:picocli-codegen:4.7.7'
+
+    // Jackson JSON
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.3'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.15.3'
 }
 
+application {
+    mainClass = "kh.edu.istad.stadoor.tunnelagent.StadoorCli"
+}
 
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+
+    // IMPORTANT: must use double quotes for interpolation
+    options.compilerArgs += []
+}
+
+graalvmNative {
+
+    binaries {
+
+        main {
+
+            imageName = 'stadoor'
+
+            mainClass = "kh.edu.istad.stadoor.tunnelagent.StadoorCli"
+
+            buildArgs.add('--no-fallback')
+
+            buildArgs.add('-H:+ReportExceptionStackTraces')
+
+            buildArgs.add('--enable-url-protocols=http,https')
+
+            verbose = true
+        }
+    }
+}
