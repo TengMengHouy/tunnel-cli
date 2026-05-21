@@ -25,27 +25,27 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Command(
-        name = "stadoor",
-        description = "Stadoor tunnel client.",
+        name = "authgate",
+        description = "Authgate tunnel client.",
         mixinStandardHelpOptions = true,
-        version = "stadoor-cli 0.3.0",
+        version = "authgate-cli 0.6.0",
         subcommands = {
-                StadoorCli.LoginCommand.class,
-                StadoorCli.LogoutCommand.class,
-                StadoorCli.StatusCommand.class,
-                StadoorCli.ConfigCommand.class,
-                StadoorCli.TunnelCommand.class,
-                StadoorCli.AgentCommand.class
+                AuthgateCli.LoginCommand.class,
+                AuthgateCli.LogoutCommand.class,
+                AuthgateCli.StatusCommand.class,
+                AuthgateCli.ConfigCommand.class,
+                AuthgateCli.TunnelCommand.class,
+                AuthgateCli.AgentCommand.class
         }
 )
-public class StadoorCli implements Callable<Integer> {
+public class AuthgateCli implements Callable<Integer> {
 
     static final ObjectMapper JSON = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
     private static final Path    DEFAULT_CONFIG_DIR =
-            Path.of(System.getProperty("user.home"), ".stadoor");
+            Path.of(System.getProperty("user.home"), ".authgate");
     private static final HttpClient HTTP = HttpClient.newHttpClient();
 
     static final int RECONNECT_DELAY_SEC = 5;
@@ -54,21 +54,21 @@ public class StadoorCli implements Callable<Integer> {
     @Option(names = "--server", description = "Tunnel server base URL.")
     String serverUrl;
 
-    @Option(names = "--config-dir", description = "Config directory. Defaults to ~/.stadoor.")
+    @Option(names = "--config-dir", description = "Config directory. Defaults to ~/.authgate.")
     Path configDir = DEFAULT_CONFIG_DIR;
 
     // ── server / SSH resolution ──────────────────────────────────────────────
     String resolvedServer() throws IOException {
         if (serverUrl != null && !serverUrl.isBlank()) return normalizeUrl(serverUrl);
         String saved = readConfig().path("serverUrl").asText(null);
-        return (saved != null && !saved.isBlank()) ? saved : "http://192.168.1.204:8080";
+        return (saved != null && !saved.isBlank()) ? saved : "http://192.168.1.248:8080";
     }
 
     String resolvedSshHost() throws IOException {
         String saved = readConfig().path("sshHost").asText(null);
         if (saved != null && !saved.isBlank()) return saved;
         URI uri = URI.create(resolvedServer());
-        return uri.getHost() != null ? uri.getHost() : "192.168.1.204";
+        return uri.getHost() != null ? uri.getHost() : "192.168.1.248";
     }
 
     int resolvedSshPort() throws IOException {
@@ -97,14 +97,14 @@ public class StadoorCli implements Callable<Integer> {
     // ── session helpers ──────────────────────────────────────────────────────
     JsonNode readSession() throws IOException {
         if (!Files.exists(sessionFile()))
-            throw new IllegalStateException("Run `stadoor login` first.");
+            throw new IllegalStateException("Run `authgate login` first.");
 
         JsonNode session = JSON.readTree(sessionFile().toFile());
         String expiresAt = session.path("expiresAt").asText(null);
         if (expiresAt != null && !expiresAt.isBlank()) {
             Instant expiry = Instant.parse(expiresAt);
             if (expiry.isBefore(Instant.now()))
-                throw new IllegalStateException("Session expired. Run `stadoor login` again.");
+                throw new IllegalStateException("Session expired. Run `authgate login` again.");
             if (expiry.minusSeconds(REFRESH_MARGIN_SEC).isBefore(Instant.now())) {
                 Term.info("Session nearing expiry — refreshing...");
                 try { session = silentRefresh(session); }
@@ -138,7 +138,7 @@ public class StadoorCli implements Callable<Integer> {
         String token    = s.path("pat").asText(null);
         if (token == null || token.isBlank()) token = s.path("token").asText(null);
         if (username == null || username.isBlank() || token == null || token.isBlank())
-            throw new IllegalStateException("Session missing credentials. Run `stadoor login` again.");
+            throw new IllegalStateException("Session missing credentials. Run `authgate login` again.");
         return basicAuth(username, token);
     }
 
@@ -152,18 +152,26 @@ public class StadoorCli implements Callable<Integer> {
 
     public static void main(String[] args) {
         List<String> argList = Arrays.asList(args);
-        boolean isVersion = argList.contains("--version") || argList.contains("-V");
-        if (!isVersion) Term.banner();
 
-        int code = new CommandLine(new StadoorCli()).execute(args);
+        // Show banner only on `login` or `--help` / `-h`
+        boolean showBanner = argList.contains("login")
+                || argList.contains("--help")
+                || argList.contains("-h");
+        if (showBanner) Term.banner();
+
+        int code = new CommandLine(new AuthgateCli()).execute(args);
         System.exit(code);
     }
 
     @Override
-    public Integer call() { CommandLine.usage(this, System.out); return 0; }
+    public Integer call() {
+        Term.banner(); // show banner when bare `authgate` is run (same as --help)
+        CommandLine.usage(this, System.out);
+        return 0;
+    }
 
     // ════════════════════════════════════════════════════════════════════════
-    //  LOGIN
+    //  LOGIN  — git-style: prompts for username & token interactively
     // ════════════════════════════════════════════════════════════════════════
 
     @Command(name = "login",
@@ -171,17 +179,48 @@ public class StadoorCli implements Callable<Integer> {
             mixinStandardHelpOptions = true)
     static class LoginCommand implements Callable<Integer> {
 
-        @ParentCommand StadoorCli parent;
+        @ParentCommand AuthgateCli parent;
 
-        @Option(names = {"-u", "--username"}, required = true)
+        // Both options are optional — we prompt when absent (git-style)
+        @Option(names = {"-u", "--username"},
+                description = "IAM username. Prompts when omitted.")
         String username;
 
-        @Option(names = {"-t", "--token"}, required = true, interactive = true, arity = "0..1",
+        @Option(names = {"-t", "--token"},
                 description = "IAM personal access token. Prompts when omitted.")
         String token;
 
         @Override
         public Integer call() throws Exception {
+            java.io.Console console = System.console();
+
+            // ── username prompt ───────────────────────────────────────────
+            if (username == null || username.isBlank()) {
+                if (console != null) {
+                    username = console.readLine("Username: ");
+                } else {
+                    System.out.print("Username: ");
+                    username = new java.util.Scanner(System.in).nextLine();
+                }
+            }
+
+            // ── token prompt (hidden, like git password) ──────────────────
+            if (token == null || token.isBlank()) {
+                if (console != null) {
+                    char[] pwd = console.readPassword("Token: ");
+                    token = pwd != null ? new String(pwd) : "";
+                } else {
+                    // Fallback when no real console (IDE, CI): visible input
+                    System.out.print("Token: ");
+                    token = new java.util.Scanner(System.in).nextLine();
+                }
+            }
+
+            if (username.isBlank() || token.isBlank()) {
+                Term.error("Username and token are required.");
+                return 1;
+            }
+
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("username", username);
             body.put("token",    token);
@@ -221,7 +260,7 @@ public class StadoorCli implements Callable<Integer> {
             mixinStandardHelpOptions = true)
     static class LogoutCommand implements Callable<Integer> {
 
-        @ParentCommand StadoorCli parent;
+        @ParentCommand AuthgateCli parent;
 
         @Override
         public Integer call() throws Exception {
@@ -239,7 +278,7 @@ public class StadoorCli implements Callable<Integer> {
             mixinStandardHelpOptions = true)
     static class StatusCommand implements Callable<Integer> {
 
-        @ParentCommand StadoorCli parent;
+        @ParentCommand AuthgateCli parent;
 
         @Override
         public Integer call() throws Exception {
@@ -266,7 +305,7 @@ public class StadoorCli implements Callable<Integer> {
             subcommands = { ConfigCommand.SaveCommand.class, ConfigCommand.ShowCommand.class })
     static class ConfigCommand implements Callable<Integer> {
 
-        @ParentCommand StadoorCli parent;
+        @ParentCommand AuthgateCli parent;
 
         @Override
         public Integer call() { CommandLine.usage(this, System.out); return 0; }
@@ -332,7 +371,7 @@ public class StadoorCli implements Callable<Integer> {
             })
     static class TunnelCommand implements Callable<Integer> {
 
-        @ParentCommand StadoorCli parent;
+        @ParentCommand AuthgateCli parent;
 
         @Override
         public Integer call() { CommandLine.usage(this, System.out); return 0; }
@@ -357,7 +396,7 @@ public class StadoorCli implements Callable<Integer> {
 
             @Override
             public Integer call() throws Exception {
-                StadoorCli root = tunnel.parent;
+                AuthgateCli root = tunnel.parent;
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("subdomain",    subdomain);
                 body.put("localPort",    localPort);
@@ -409,7 +448,7 @@ public class StadoorCli implements Callable<Integer> {
 
             @Override
             public Integer call() throws Exception {
-                StadoorCli root = tunnel.parent;
+                AuthgateCli root = tunnel.parent;
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("subdomain",    subdomain);
                 body.put("localPort",    localPort);
@@ -437,7 +476,7 @@ public class StadoorCli implements Callable<Integer> {
                 Term.kv("Status",  response.path("status").asText(""));
                 Term.kv("SSH cmd", response.path("sshCommand").asText(""));
                 Term.nl();
-                Term.info("Run: stadoor tunnel connect --tunnel-name " + subdomain
+                Term.info("Run: authgate tunnel connect --tunnel-name " + subdomain
                         + " --keygen " + keygen + " --local-port " + localPort);
                 Term.nl();
                 return 0;
@@ -460,7 +499,7 @@ public class StadoorCli implements Callable<Integer> {
 
             @Override
             public Integer call() throws Exception {
-                StadoorCli root = tunnel.parent;
+                AuthgateCli root = tunnel.parent;
                 String pat = root.readSession().path("pat").asText(
                         root.readSession().path("token").asText(""));
                 Term.info("Connecting SSH for " + tunnelName + "/" + keygen
@@ -481,7 +520,7 @@ public class StadoorCli implements Callable<Integer> {
 
             @Override
             public Integer call() throws Exception {
-                StadoorCli root = tunnel.parent;
+                AuthgateCli root = tunnel.parent;
                 Term.SpinnerHandle sp = Term.spinner("Fetching tunnels");
                 JsonNode response;
                 try {
@@ -554,7 +593,7 @@ public class StadoorCli implements Callable<Integer> {
 
             @Override
             public Integer call() throws Exception {
-                StadoorCli root = tunnel.parent;
+                AuthgateCli root = tunnel.parent;
                 Term.SpinnerHandle sp = Term.spinner("Disconnecting " + tunnelName + "/" + keygen);
                 try {
                     delete(root.endpoint("/api/tunnels/" + tunnelName + "/" + keygen),
@@ -583,7 +622,7 @@ public class StadoorCli implements Callable<Integer> {
             })
     static class AgentCommand implements Callable<Integer> {
 
-        @ParentCommand StadoorCli parent;
+        @ParentCommand AuthgateCli parent;
 
         @Override
         public Integer call() { CommandLine.usage(this, System.out); return 0; }
@@ -600,7 +639,7 @@ public class StadoorCli implements Callable<Integer> {
 
             @Override
             public Integer call() throws Exception {
-                StadoorCli root = agentCmd.parent;
+                AuthgateCli root = agentCmd.parent;
                 String id = nodeId != null ? nodeId : UUID.randomUUID().toString();
                 if (host == null) host = InetAddress.getLocalHost().getHostAddress();
 
@@ -624,7 +663,7 @@ public class StadoorCli implements Callable<Integer> {
                 Term.kv("Node ID", response.path("nodeId").asText(id));
                 Term.kv("Status",  response.path("status").asText(""));
                 Term.nl();
-                Term.info("Run heartbeats: stadoor agent heartbeat --node-id " + id + " --loop 30");
+                Term.info("Run heartbeats: authgate agent heartbeat --node-id " + id + " --loop 30");
                 Term.nl();
                 return 0;
             }
@@ -642,7 +681,7 @@ public class StadoorCli implements Callable<Integer> {
 
             @Override
             public Integer call() throws Exception {
-                StadoorCli root = agentCmd.parent;
+                AuthgateCli root = agentCmd.parent;
 
                 if (loopSeconds != null && loopSeconds > 0) {
                     Term.info("Heartbeat for node " + nodeId + " every " + loopSeconds + "s. Ctrl-C to stop.");
@@ -663,7 +702,7 @@ public class StadoorCli implements Callable<Integer> {
                 return 0;
             }
 
-            private void sendHeartbeat(StadoorCli root, String nodeId) throws Exception {
+            private void sendHeartbeat(AuthgateCli root, String nodeId) throws Exception {
                 HttpRequest.Builder req = HttpRequest.newBuilder()
                         .uri(URI.create(root.endpoint("/api/agents/" + nodeId + "/heartbeat")))
                         .POST(HttpRequest.BodyPublishers.noBody());
@@ -682,7 +721,7 @@ public class StadoorCli implements Callable<Integer> {
 
             @Override
             public Integer call() throws Exception {
-                StadoorCli root = agentCmd.parent;
+                AuthgateCli root = agentCmd.parent;
                 Term.SpinnerHandle sp = Term.spinner("Allocating node");
                 JsonNode response;
                 try {
@@ -701,7 +740,7 @@ public class StadoorCli implements Callable<Integer> {
     //  SSH KEEP-ALIVE LOOP
     // ════════════════════════════════════════════════════════════════════════
 
-    static void runSshLoop(StadoorCli root, String sshUser, String pat,
+    static void runSshLoop(AuthgateCli root, String sshUser, String pat,
                            int localPort, boolean reconnect) throws Exception {
 
         String sshHost = root.resolvedSshHost();
@@ -729,6 +768,8 @@ public class StadoorCli implements Callable<Integer> {
 
                 List<String> cmd = new ArrayList<>(Arrays.asList(
                         "ssh",
+                        "-N",
+                        "-T",
                         "-R", "0:localhost:" + localPort,
                         "-p", String.valueOf(sshPort),
                         "-o", "StrictHostKeyChecking=no",
@@ -765,11 +806,11 @@ public class StadoorCli implements Callable<Integer> {
     static Path writeAskpassScript(String pat) throws IOException {
         String os = System.getProperty("os.name", "").toLowerCase();
         if (os.contains("win")) {
-            Path bat = Files.createTempFile("stadoor-askpass-", ".bat");
+            Path bat = Files.createTempFile("authgate-askpass-", ".bat");
             Files.writeString(bat, "@echo off\r\necho " + pat + "\r\n");
             return bat;
         }
-        Path sh = Files.createTempFile("stadoor-askpass-", ".sh");
+        Path sh = Files.createTempFile("authgate-askpass-", ".sh");
         Files.writeString(sh, "#!/bin/sh\nprintf '%s' '" + pat.replace("'", "'\\''") + "'\n");
         return sh;
     }
