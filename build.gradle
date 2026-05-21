@@ -33,7 +33,7 @@ dependencies {
 }
 
 application {
-    mainClass = "kh.edu.istad.stadoor.tunnelagent.StadoorCli"
+    mainClass = "kh.edu.istad.stadoor.tunnelagent.AuthgateCli"
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -49,9 +49,9 @@ graalvmNative {
 
         main {
 
-            imageName = 'stadoor'
+            imageName = 'authgate'
 
-            mainClass = "kh.edu.istad.stadoor.tunnelagent.StadoorCli"
+            mainClass = "kh.edu.istad.stadoor.tunnelagent.AuthgateCli"
 
             buildArgs.add('--no-fallback')
 

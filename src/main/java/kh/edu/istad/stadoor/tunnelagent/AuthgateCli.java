@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicReference;
         name = "authgate",
         description = "Authgate tunnel client.",
         mixinStandardHelpOptions = true,
-        version = "authgate-cli 0.6.0",
+        version = "authgate-cli 0.9.0",
         subcommands = {
                 AuthgateCli.LoginCommand.class,
                 AuthgateCli.LogoutCommand.class,
@@ -61,14 +61,14 @@ public class AuthgateCli implements Callable<Integer> {
     String resolvedServer() throws IOException {
         if (serverUrl != null && !serverUrl.isBlank()) return normalizeUrl(serverUrl);
         String saved = readConfig().path("serverUrl").asText(null);
-        return (saved != null && !saved.isBlank()) ? saved : "http://192.168.1.248:8080";
+        return (saved != null && !saved.isBlank()) ? saved : "http://192.168.1.108:8080";
     }
 
     String resolvedSshHost() throws IOException {
         String saved = readConfig().path("sshHost").asText(null);
         if (saved != null && !saved.isBlank()) return saved;
         URI uri = URI.create(resolvedServer());
-        return uri.getHost() != null ? uri.getHost() : "192.168.1.248";
+        return uri.getHost() != null ? uri.getHost() : "192.168.1.108";
     }
 
     int resolvedSshPort() throws IOException {
@@ -782,7 +782,13 @@ public class AuthgateCli implements Callable<Integer> {
                 ));
 
                 ProcessBuilder pb = new ProcessBuilder(cmd);
-                pb.inheritIO();
+                // Inherit stdout/stderr so SSH progress is visible, but
+                // redirect stdin to PIPE (no controlling tty) so that
+                // SSH_ASKPASS_REQUIRE=force actually fires instead of
+                // falling back to a terminal "Password authentication?" prompt.
+                pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+                pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+                pb.redirectInput(ProcessBuilder.Redirect.PIPE);
                 pb.environment().put("SSH_ASKPASS",         askpass.toString());
                 pb.environment().put("SSH_ASKPASS_REQUIRE", "force");
                 pb.environment().put("DISPLAY",             ":0");

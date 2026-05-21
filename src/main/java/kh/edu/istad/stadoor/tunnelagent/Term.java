@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Terminal UI toolkit for Stadoor CLI.
+ * Terminal UI toolkit for Authgate CLI.
  *
  * All colour output goes through picocli's {@link Ansi} renderer so it
  * automatically degrades to plain text when the terminal does not support
@@ -48,17 +48,17 @@ public final class Term {
     // ════════════════════════════════════════════════════════════════════════
 
     /**
-     * Prints the Stadoor ASCII banner in cyan.
-     * Called once at the start of any interactive session.
+     * Prints the Authgate ASCII banner in cyan.
+     * Called only on `authgate login` or `authgate --help`.
      */
     public static void banner() {
         print("@|bold,cyan " +
-                " ___  _____  __   ____   ___   ___  ___ \n" +
-                "/ __||_   _|/  \\ |  _ \\ / _ \\ / _ \\| _ \\\n" +
-                "\\__ \\  | | / /\\ \\| | | | | | | | | |   /\n" +
-                "|___/  |_|/_/  \\_\\_|_/ \\___/ \\___/|_|_\\\n" +
+                "  _   _   _ _____ _  _  ___  _   _____ ___ \n" +
+                " /_\\ | | | |_   _| || |/ __|| | / _ \\ __\\\n" +
+                "/ _ \\| |_| | | | | __ | (_ || |_| |_| _| \n" +
+                "/_/ \\_\\\\___/  |_| |_||_|\\___|___\\___/|___|\n" +
                 "|@");
-        print("@|fg(245)  Secure tunnel client  •  v0.2.0|@\n");
+        print("@|fg(245)  Secure tunnel client  •  v0.6.0|@\n");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -81,8 +81,8 @@ public final class Term {
         nl();
         print("@|bold,cyan  ╔" + line + "╗|@");
         print("@|bold,cyan  ║|@" +
-                "  @|bold,white Welcome to Stadoor,|@ " +
-                "@|bold,cyan " + pad(username, 22) + "|@" +
+                "  @|bold,white Welcome to Authgate,|@ " +
+                "@|bold,cyan " + pad(username, 21) + "|@" +
                 "@|bold,cyan  ║|@");
         print("@|bold,cyan  ╠" + line + "╣|@");
         infoRow("  User",    username,  44);
@@ -106,20 +106,35 @@ public final class Term {
     public static void tunnelLive(String subdomain, String keygen,
                                   String tunnelUrl, int localPort,
                                   boolean basicAuth) {
-        String line = "─".repeat(44);
+        // BOX_WIDTH must match the ─ repeat count; all inner content is padded to this.
+        final int BOX_WIDTH = 44;
+        String line = "─".repeat(BOX_WIDTH);
         nl();
-        print("@|bold,green  ╔" + line + "╗|@");
-        print("@|bold,green  ║|@  @|bold,white Tunnel is LIVE|@  " +
-                "@|bold,green ✔|@" + spaces(25) + "@|bold,green ║|@");
-        print("@|bold,green  ╠" + line + "╣|@");
-        infoRowGreen("  Name",      subdomain + "/" + keygen, 44);
-        infoRowGreen("  Public URL",shorten(tunnelUrl, 38),   44);
-        infoRowGreen("  Local",     "localhost:" + localPort,  44);
-        infoRowGreen("  Auth",      basicAuth ? "basic-auth enabled" : "none", 44);
-        print("@|bold,green  ╠" + line + "╣|@");
-        print("@|bold,green  ║|@  @|fg(245) Press Ctrl-C to stop the tunnel.|@" +
-                spaces(13) + "@|bold,green ║|@");
-        print("@|bold,green  ╚" + line + "╝|@");
+        print("@|bold,green  ╔" + line + "╗|@\n");
+
+        // ── header row: "  Tunnel is LIVE  ✔  <padding>  " ─────────────────
+        // Plain-text content (between the two ║ chars): 2 leading + label + 2 + ✔ + pad
+        String headerLabel = "Tunnel is LIVE";
+        // "  " + label + "  " + "✔" = 2+14+2+1 = 19 plain chars; fill rest of BOX_WIDTH
+        int headerPad = BOX_WIDTH - 2 - headerLabel.length() - 2 - 1;
+        print("@|bold,green  ║|@  @|bold,white " + headerLabel + "|@  " +
+                "@|bold,green ✔|@" + spaces(Math.max(0, headerPad)) +
+                "@|bold,green ║|@\n");
+
+        print("@|bold,green  ╠" + line + "╣|@\n");
+        infoRowGreen("  Name",       subdomain + "/" + keygen,  BOX_WIDTH);
+        infoRowGreen("  Public URL", shorten(tunnelUrl, 36),    BOX_WIDTH);
+        infoRowGreen("  Local",      "localhost:" + localPort,   BOX_WIDTH);
+        infoRowGreen("  Auth",       basicAuth ? "basic-auth enabled" : "none", BOX_WIDTH);
+        print("@|bold,green  ╠" + line + "╣|@\n");
+
+        // ── footer row ───────────────────────────────────────────────────────
+        String footerText = "Press Ctrl-C to stop the tunnel.";
+        int footerPad = BOX_WIDTH - 2 - footerText.length();
+        print("@|bold,green  ║|@  @|fg(245) " + footerText + "|@" +
+                spaces(Math.max(0, footerPad)) + "@|bold,green ║|@\n");
+
+        print("@|bold,green  ╚" + line + "╝|@\n");
         nl();
     }
 
@@ -143,7 +158,7 @@ public final class Term {
         AtomicInteger frame    = new AtomicInteger(0);
         AtomicBoolean running  = new AtomicBoolean(true);
         ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "stadoor-spinner");
+            Thread t = new Thread(r, "authgate-spinner");
             t.setDaemon(true);
             return t;
         });
